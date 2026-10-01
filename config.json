@@ -1,0 +1,20 @@
+{
+  "port": 7788,
+  "hotkey": "Ctrl+Alt+P",
+  "topmost": true,
+  "edgeProfile": ".qcn/edge-profile",
+  "geometry": {
+    "center": {
+      "width": 760,
+      "height": 0
+    },
+    "left": {
+      "width": 380,
+      "height": 0
+    },
+    "right": {
+      "width": 380,
+      "height": 0
+    }
+  }
+}
