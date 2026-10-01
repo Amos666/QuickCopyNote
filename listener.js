@@ -91,11 +91,38 @@ public static class QcnHotkey {
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern IntPtr SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint flags);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr ProcessId);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 
   const uint WM_HOTKEY = 0x0312;
   const int SW_HIDE = 0, SW_SHOW = 5, SW_MINIMIZE = 6, SW_RESTORE = 9;
   static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
   const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001;
+
+  // 绕过 Windows 前台锁:伪造一次 Alt 键 + 附加输入线程,真正把焦点抢给面板窗口,
+  // 这样隐藏(SW_HIDE)后重新唤起,页面才会收到 focus 事件并恢复键盘焦点。
+  static void FocusSteal(IntPtr h) {
+    ShowWindow(h, SW_RESTORE);
+    if (_topmost) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    IntPtr fg = GetForegroundWindow();
+    uint tidFg = GetWindowThreadProcessId(fg, IntPtr.Zero);
+    uint tidMe = GetCurrentThreadId();
+    bool attached = false;
+    try {
+      if (tidFg != tidMe && tidFg != 0) attached = AttachThreadInput(tidMe, tidFg, true);
+      keybd_event(0x12, 0, 0, UIntPtr.Zero);   // Alt down
+      keybd_event(0x12, 0, 2, UIntPtr.Zero);   // Alt up
+      BringWindowToTop(h);
+      SetForegroundWindow(h);
+      SetActiveWindow(h);
+    } finally {
+      if (attached) AttachThreadInput(tidMe, tidFg, false);
+    }
+  }
 
   static string _title; static string _baseUrl; static bool _topmost;
 
@@ -124,11 +151,7 @@ public static class QcnHotkey {
     if (visible && isFore) {
       ShowWindow(h, SW_HIDE);
     } else {
-      // SW_RESTORE 对最小化和被 SW_HIDE 隐藏的窗口都有效;
-      // 注意 SW_SHOW(5) 会被 Edge 应用窗口忽略(实测无法从隐藏恢复)
-      ShowWindow(h, SW_RESTORE);
-      if (_topmost) SetWindowPos(h, HWND_TOPMOST, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE);
-      SetForegroundWindow(h);
+      FocusSteal(h);
     }
   }
 
@@ -141,9 +164,7 @@ public static class QcnHotkey {
       Thread.Sleep(100);
       IntPtr h = FindWindowW("Chrome_WidgetWin_1", _title);
       if (h != IntPtr.Zero) {
-        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
-        if (_topmost) SetWindowPos(h, HWND_TOPMOST, 0,0,0,0, SWP_NOMOVE | SWP_NOSIZE);
-        SetForegroundWindow(h);
+        FocusSteal(h);
         return;
       }
     }

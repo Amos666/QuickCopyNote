@@ -222,7 +222,7 @@
     </label>
     <span class="legend">
       <span><kbd>Enter</kbd> 复制</span>
-      <span><kbd>Ctrl</kbd>+<kbd>J/K</kbd> 选择</span>
+      <span><kbd>↑</kbd><kbd>↓</kbd> / <kbd>j</kbd><kbd>k</kbd> 选择</span>
       <span><kbd>Ctrl</kbd>+<kbd>N</kbd> 新增</span>
       <span><kbd>Ctrl</kbd>+<kbd>E</kbd> 编辑</span>
       <span><kbd>Alt</kbd>+<kbd>↑↓</kbd> 排序</span>
@@ -553,7 +553,7 @@
     if (mode === 'server') { try { await fetch('/hide'); return; } catch (e) {} }
     // 降级:尝试关窗
     window.close();
-    toast('已复制 · 按热键可再次隐藏窗口');
+    toast('已复制 · 按全局热键可再次唤起');
   }
 
   // ---- 条目操作 ----
@@ -801,17 +801,6 @@
   }
   window.addEventListener('focus', refocusSearch);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refocusSearch(); });
-
-  // [TEMP-DIAG] 焦点诊断上报,验证后移除
-  function diagFocus(phase) {
-    if (mode !== 'server') return;
-    try {
-      fetch('/diag-focus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase, hasFocus: document.hasFocus(), hidden: document.hidden, active: (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || 'none' }) }).catch(() => {});
-    } catch (e) { /* ignore */ }
-  }
-  document.addEventListener('visibilitychange', () => { diagFocus('vc:' + document.visibilityState); if (!document.hidden) setTimeout(() => diagFocus('after-refocus'), 400); });
-  window.addEventListener('focus', () => { diagFocus('winfocus'); setTimeout(() => diagFocus('after-refocus-2'), 400); });
-  diagFocus('init');
 
   // 编辑器按钮
   $('#btnCancel').onclick = closeEditor;

@@ -200,6 +200,35 @@ public class W {
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hh, bool repaint);
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
   [DllImport("user32.dll")] public static extern bool SystemParametersInfo(int a, int b, ref RECT r, int c);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr ProcessId);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+
+  static readonly IntPtr TOP = new IntPtr(-1);
+
+  // 绕过 Windows 前台锁:伪造一次 Alt 键 + 附加输入线程,才能真正把焦点抢给目标窗口。
+  public static void Foreground(IntPtr h) {
+    ShowWindow(h, 9);              // SW_RESTORE:对隐藏/最小化窗口都有效
+    SetWindowPos(h, TOP, 0,0,0,0, 0x0002 -bor 0x0001); // TOPMOST, 不改位置尺寸
+    IntPtr fg = GetForegroundWindow();
+    uint tidFg = GetWindowThreadProcessId(fg, IntPtr.Zero);
+    uint tidMe = GetCurrentThreadId();
+    bool attached = false;
+    try {
+      if (tidFg != tidMe) attached = AttachThreadInput(tidMe, tidFg, true);
+      keybd_event(0x12, 0, 0, UIntPtr.Zero);   // Alt down
+      keybd_event(0x12, 0, 2, UIntPtr.Zero);   // Alt up
+      BringWindowToTop(h);
+      SetForegroundWindow(h);
+      SetActiveWindow(h);
+    } finally {
+      if (attached) AttachThreadInput(tidMe, tidFg, false);
+    }
+  }
 }
 "@
 $title = '${title}'
@@ -211,10 +240,7 @@ $h = [W]::FindWindowW('Chrome_WidgetWin_1', $title)
       common +
       `
 if ($h -eq [IntPtr]::Zero) { Write-Output 'NOWINDOW'; exit 0 }
-[void][W]::ShowWindow($h, 9)
-[void][W]::SetForegroundWindow($h)
-$topmost = [IntPtr](-1)
-[void][W]::SetWindowPos($h, $topmost, 0,0,0,0, 0x0002 -bor 0x0001)
+[void][W]::Foreground($h)
 Write-Output 'OK'
 `
     );
@@ -595,13 +621,6 @@ async function handle(req, res) {
         return sendJson(res, 200, { ok, enabled: isAutostartEnabled() });
       }
       return sendJson(res, 405, { error: 'method not allowed' });
-    }
-
-    // [TEMP-DIAG] 焦点诊断日志,验证后移除
-    if (p === '/diag-focus') {
-      const raw = await readBody(req);
-      console.log('[diag-focus]', raw);
-      return sendJson(res, 200, { ok: true });
     }
 
     // ---- 窗口 IPC ----
