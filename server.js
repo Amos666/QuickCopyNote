@@ -205,28 +205,47 @@ public class W {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 
   static readonly IntPtr TOP = new IntPtr(-1);
+  const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_SHOWWINDOW = 0x0040;
 
-  // 绕过 Windows 前台锁:伪造一次 Alt 键 + 附加输入线程,才能真正把焦点抢给目标窗口。
+  // 绕过 Windows 前台锁:面板窗口属于 Edge(另一个进程),单纯 SetForegroundWindow 会被拒。
+  // 用 SwitchToThisWindow(资源管理器同款 API)+ 附加目标线程到前台线程 + 最小化/还原兜底 + 重试。
   public static void Foreground(IntPtr h) {
-    ShowWindow(h, 9);              // SW_RESTORE:对隐藏/最小化窗口都有效
-    SetWindowPos(h, TOP, 0,0,0,0, 0x0002 -bor 0x0001); // TOPMOST, 不改位置尺寸
-    IntPtr fg = GetForegroundWindow();
-    uint tidFg = GetWindowThreadProcessId(fg, IntPtr.Zero);
-    uint tidMe = GetCurrentThreadId();
-    bool attached = false;
-    try {
-      if (tidFg != tidMe) attached = AttachThreadInput(tidMe, tidFg, true);
-      keybd_event(0x12, 0, 0, UIntPtr.Zero);   // Alt down
-      keybd_event(0x12, 0, 2, UIntPtr.Zero);   // Alt up
-      BringWindowToTop(h);
-      SetForegroundWindow(h);
-      SetActiveWindow(h);
-    } finally {
-      if (attached) AttachThreadInput(tidMe, tidFg, false);
+    // 统一 SW_RESTORE:被 SW_HIDE 的 Edge 应用窗口会忽略 SW_SHOW(5)
+    ShowWindow(h, 9);
+    SetWindowPos(h, TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    // SW_HIDE 的窗口往往仍是"假前台"(visible=False, fore=True),SetForegroundWindow
+    // 对它是 no-op、WM_ACTIVATE 不派发 → 页面收不到键盘焦点。
+    // 必须先最小化让前台真正易主,再在 AttachThreadInput 作用域内还原并抢前台,
+    // 强制走完整的"失活→激活"周期。
+    ShowWindow(h, 6);
+    System.Threading.Thread.Sleep(50);
+    uint tMe = GetCurrentThreadId();
+    for (int i = 0; i < 8; i++) {
+      IntPtr fg = GetForegroundWindow();
+      uint tFg = GetWindowThreadProcessId(fg, IntPtr.Zero);
+      uint tTg = GetWindowThreadProcessId(h, IntPtr.Zero);
+      bool a1 = tFg != 0 && tFg != tMe && AttachThreadInput(tMe, tFg, true);
+      bool a2 = tFg != 0 && tFg != tTg && AttachThreadInput(tTg, tFg, true);
+      try {
+        ShowWindow(h, 9);
+        SetWindowPos(h, TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        BringWindowToTop(h);
+        SetForegroundWindow(h);
+        SetActiveWindow(h);
+        SetFocus(h);
+        SwitchToThisWindow(h, true);
+      } finally {
+        if (a2) AttachThreadInput(tTg, tFg, false);
+        if (a1) AttachThreadInput(tMe, tFg, false);
+      }
+      System.Threading.Thread.Sleep(40);
+      if (GetForegroundWindow() == h) break;
     }
   }
 }
@@ -247,6 +266,7 @@ Write-Output 'OK'
   }
 
   if (op === 'hide') {
+    // SW_HIDE(0):任务栏按钮同步消失,与 listener.js 的热键收起一致
     return (
       common +
       `

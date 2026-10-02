@@ -223,6 +223,7 @@
     <span class="legend">
       <span><kbd>Enter</kbd> 复制</span>
       <span><kbd>↑</kbd><kbd>↓</kbd> / <kbd>j</kbd><kbd>k</kbd> 选择</span>
+      <span><kbd>/</kbd> 搜索</span>
       <span><kbd>Ctrl</kbd>+<kbd>N</kbd> 新增</span>
       <span><kbd>Ctrl</kbd>+<kbd>E</kbd> 编辑</span>
       <span><kbd>Alt</kbd>+<kbd>↑↓</kbd> 排序</span>
@@ -756,7 +757,7 @@
     if (!mod && key === 'Delete') { e.preventDefault(); deleteSelected(); return; }
     if (!mod && key === 'ArrowDown' && !typing) { e.preventDefault(); moveSel(1); return; }
     if (!mod && key === 'ArrowUp' && !typing) { e.preventDefault(); moveSel(-1); return; }
-    // 纯 j/k:仅当焦点不在输入框时生效(输入框里用 Ctrl/Alt+J/K,避免打断打字)
+    // 纯 j/k:普通模式下直接上下选择(vi 逻辑,j=下 k=上)
     if (!mod && !e.altKey && (lk === 'j' || lk === 'k') && !typing) {
       e.preventDefault(); moveSel(lk === 'j' ? 1 : -1); return;
     }
@@ -765,6 +766,12 @@
     if (!mod && key === 'PageDown') { e.preventDefault(); moveSel(10); return; }
     if (!mod && key === 'PageUp') { e.preventDefault(); moveSel(-10); return; }
 
+    // '/' 开始搜索(vi 习惯):清空旧查询并聚焦搜索框
+    if (!mod && !e.altKey && key === '/' && !typing) {
+      e.preventDefault();
+      const s = $('#search'); s.focus(); s.value = ''; query = ''; selectedId = null; renderList();
+      return;
+    }
     // 直接打字即搜索(焦点不在输入框时)
     if (!mod && !e.altKey && key.length === 1 && !isTypingTarget(document.activeElement)) {
       e.preventDefault();
@@ -780,7 +787,8 @@
     else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); moveSel(-1); }
     else if (e.key === 'Escape') {
       e.preventDefault(); e.stopPropagation();
-      if (query) { query = ''; e.target.value = ''; renderList(); } else hidePanel();
+      if (query) { query = ''; e.target.value = ''; renderList(); e.target.blur(); } // 退回普通模式,j/k 立即可用
+      else hidePanel();
     }
   });
 
@@ -790,17 +798,17 @@
   document.querySelectorAll('#posSwitch button').forEach((b) => (b.onclick = () => setPosition(b.dataset.pos)));
   $('#autostart').addEventListener('change', (e) => toggleAutostart(e.target.checked));
 
-  // 窗口被 SW_HIDE 隐藏后再 SW_RESTORE 唤起时,系统不会把键盘焦点交还页面,
-  // 导致 j/k、方向键、打字搜索全部失灵(必须鼠标点一下)。这里在重新可见/获得
-  // 窗口焦点时主动夺回文档焦点并聚焦搜索框。
-  function refocusSearch() {
-    if (!$('#editor').classList.contains('hidden')) return;
+  // 面板被隐藏后经全局热键(或 /summon)重新唤起:窗口重新拿到前台/可见时,
+  // 把文档焦点归位到「普通模式」(焦点在 body),这样 j/k、方向键、打字搜索
+  // 立刻可用,无需鼠标点击。注意:这里绝不能聚焦搜索框,否则纯 j/k 会被当成打字。
+  function refocusPanel() {
+    if (!$('#editor').classList.contains('hidden')) return; // 编辑器开着别打扰
     try { window.focus(); } catch (e) { /* ignore */ }
-    const s = $('#search');
-    if (document.activeElement !== s) s.focus();
+    const a = document.activeElement;
+    if (a && a !== document.body && typeof a.blur === 'function') a.blur();
   }
-  window.addEventListener('focus', refocusSearch);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refocusSearch(); });
+  window.addEventListener('focus', refocusPanel);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refocusPanel(); });
 
   // 编辑器按钮
   $('#btnCancel').onclick = closeEditor;
@@ -818,7 +826,8 @@
       const pos = state.ui.position || 'center';
       try { await fetch('/move?pos=' + encodeURIComponent(pos)); } catch (e) { /* ignore */ }
     }
-    $('#search').focus();
+    // 打开即处于「普通模式」:焦点留在 body,纯 j/k 直接上下选择;
+    // 按 '/' 或直接打字进入搜索(插入模式),Esc 退回普通模式。
   })();
 })();
 </script>

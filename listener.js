@@ -7,7 +7,10 @@
  * 由 server.js 拉起。它 spawn 一个隐藏的 powershell 子进程,内部用 Add-Type 编译一小段 C#:
  *   - RegisterHotKey 注册全局热键
  *   - GetMessage 消息循环接收 WM_HOTKEY
- *   - 命中时按标题令牌找到 Edge 应用窗口:可见→SW_HIDE 隐藏(任务栏按钮同步消失);隐藏→恢复+置顶+前台
+ *   - 命中时按标题令牌找到 Edge 应用窗口:当前可见且在前台→SW_HIDE 收起(任务栏按钮同步消失);否则→显示+置顶+前台抢焦点
+ *   - 唤起不靠 SetForegroundWindow(会被前台锁拒绝,窗口又属于 Edge 跨进程),
+ *     而是 SwitchToThisWindow + AttachThreadInput + SWP_SHOWWINDOW + 最小化/还原兜底多重奏,
+ *     因此即使先前是 SW_HIDE 隐藏,也能重新拿到前台与键盘焦点。
  *   - 窗口不存在→回调本机 /open-window 让 server.js 打开 Edge
  *
  * 热键这条高频路径全程在这个常驻进程内完成,不 spawn 新进程,故响应最快。
@@ -95,32 +98,59 @@ public static class QcnHotkey {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 
   const uint WM_HOTKEY = 0x0312;
   const int SW_HIDE = 0, SW_SHOW = 5, SW_MINIMIZE = 6, SW_RESTORE = 9;
   static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-  const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001;
+  const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_SHOWWINDOW = 0x0040;
 
-  // 绕过 Windows 前台锁:伪造一次 Alt 键 + 附加输入线程,真正把焦点抢给面板窗口,
-  // 这样隐藏(SW_HIDE)后重新唤起,页面才会收到 focus 事件并恢复键盘焦点。
-  static void FocusSteal(IntPtr h) {
+  // 把隐藏/最小化的窗口显示出来并真正抢到前台+键盘焦点。
+  // 关键:面板窗口属于 Edge(另一个进程),SetForegroundWindow 会被系统前台锁拒绝。
+  // 可靠做法:SwitchToThisWindow(系统资源管理器用的 API,允许后台进程前置窗口)
+  //          + 把"目标窗口所在线程"附加到当前前台线程(不是把本进程线程附加)
+  //          + 最小化→还原兜底 + 校验后重试。
+  static void ShowAndFocus(IntPtr h) {
+    // 统一 SW_RESTORE:对被 SW_HIDE 的 Edge 应用窗口,SW_SHOW(5) 会被忽略,
+    // SW_RESTORE(9) 对隐藏/最小化两种状态都有效(实测)。
     ShowWindow(h, SW_RESTORE);
-    if (_topmost) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-    IntPtr fg = GetForegroundWindow();
-    uint tidFg = GetWindowThreadProcessId(fg, IntPtr.Zero);
-    uint tidMe = GetCurrentThreadId();
-    bool attached = false;
-    try {
-      if (tidFg != tidMe && tidFg != 0) attached = AttachThreadInput(tidMe, tidFg, true);
-      keybd_event(0x12, 0, 0, UIntPtr.Zero);   // Alt down
-      keybd_event(0x12, 0, 2, UIntPtr.Zero);   // Alt up
-      BringWindowToTop(h);
-      SetForegroundWindow(h);
-      SetActiveWindow(h);
-    } finally {
-      if (attached) AttachThreadInput(tidMe, tidFg, false);
+    uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+    if (_topmost) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    else SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, flags);
+
+    // 关键:被 SW_HIDE 的窗口通常仍是 GetForegroundWindow(假前台,visible=False, fore=True)。
+    // 此时 SetForegroundWindow(h) 是 no-op,WM_ACTIVATE 不会派发,渲染进程永远拿不到键盘焦点。
+    // 必须先 SW_MINIMIZE 让系统把前台真正交给别的窗口,再在 AttachThreadInput 作用域内
+    // SW_RESTORE + 抢前台,强制走一次完整的"失活→激活"周期,焦点才会落到页面。
+    ShowWindow(h, SW_MINIMIZE);
+    Thread.Sleep(50);
+
+    uint tMe = GetCurrentThreadId();
+    for (int i = 0; i < 8; i++) {
+      IntPtr fg = GetForegroundWindow();
+      uint tFg = GetWindowThreadProcessId(fg, IntPtr.Zero);
+      uint tTg = GetWindowThreadProcessId(h, IntPtr.Zero);
+      bool a1 = tFg != 0 && tFg != tMe && AttachThreadInput(tMe, tFg, true);
+      bool a2 = tFg != 0 && tFg != tTg && AttachThreadInput(tTg, tFg, true);
+      try {
+        ShowWindow(h, SW_RESTORE);
+        if (_topmost) SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        else SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, flags);
+        BringWindowToTop(h);
+        SetForegroundWindow(h);
+        SetActiveWindow(h);
+        SetFocus(h);
+        SwitchToThisWindow(h, true);
+      } finally {
+        if (a2) AttachThreadInput(tTg, tFg, false);
+        if (a1) AttachThreadInput(tMe, tFg, false);
+      }
+
+      Thread.Sleep(40);
+      if (GetForegroundWindow() == h) break;
     }
   }
 
@@ -146,12 +176,17 @@ public static class QcnHotkey {
   static void Toggle() {
     IntPtr h = FindWindowW("Chrome_WidgetWin_1", _title);
     if (h == IntPtr.Zero) { Open(); return; }
-    bool visible = IsWindowVisible(h) && !IsIconic(h);
+    // 收起用 SW_HIDE:任务栏按钮同步消失(用户要求"状态栏同步隐藏")。
+    // 焦点风险在唤起侧解决:ShowAndFocus 用 SwitchToThisWindow(资源管理器同款,
+    // 允许后台进程前置窗口)+ 附加输入线程 + SWP_SHOWWINDOW + 最小化/还原兜底,
+    // 从 SW_HIDE 恢复同样能拿到前台与键盘焦点。
+    bool iconic = IsIconic(h);
+    bool visible = IsWindowVisible(h) && !iconic;
     bool isFore = GetForegroundWindow() == h;
     if (visible && isFore) {
       ShowWindow(h, SW_HIDE);
     } else {
-      FocusSteal(h);
+      ShowAndFocus(h);
     }
   }
 
@@ -159,12 +194,12 @@ public static class QcnHotkey {
     try {
       using (var wc = new WebClient()) { wc.DownloadString(_baseUrl + "/open-window"); }
     } catch {}
-    // Edge 冷启动需要时间,最多等 ~4 秒,窗口一出现就前置
-    for (int i = 0; i < 40; i++) {
+    // Edge 冷启动需要时间,最多等 ~5 秒,窗口一出现就前置抢焦点
+    for (int i = 0; i < 50; i++) {
       Thread.Sleep(100);
       IntPtr h = FindWindowW("Chrome_WidgetWin_1", _title);
       if (h != IntPtr.Zero) {
-        FocusSteal(h);
+        ShowAndFocus(h);
         return;
       }
     }
