@@ -27,10 +27,22 @@ Say "[OK] Node.js $nodeVer"
 Say '[*] 检查并清理正在运行的旧版本 ...'
 & node (Join-Path $setupDir 'kill-old.js')
 
-# ---- 3. 启动服务(最小化窗口,含 --open 自动打开 Edge 应用窗口)----
-Say '[*] 启动本地服务 ...'
+# ---- 3. 启动服务(全后台:经 wscript+vbs 隐藏启动 node,含 --open 打开 Edge 面板;
+#      与开机自启同一方案,不留 cmd 控制台窗口)----
+Say '[*] 启动本地服务(后台运行,无窗口) ...'
 $serverJs = Join-Path $root 'server.js'
-Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', "node `"$serverJs`" --open") -WindowStyle Minimized
+$nodeExe = (Get-Command node).Source
+$qcnDir = Join-Path $root '.qcn'
+if (-not (Test-Path $qcnDir)) { New-Item -ItemType Directory -Path $qcnDir -Force | Out-Null }
+$vbs = Join-Path $qcnDir 'install-hidden.vbs'
+$vbsContent = @"
+Set sh = CreateObject("WScript.Shell")
+sh.CurrentDirectory = "$root"
+sh.Run """$nodeExe"" ""$serverJs"" --open", 0, False
+"@
+# wscript 不认 UTF-8 BOM,必须按 ANSI 写出(路径均为 ASCII)
+[System.IO.File]::WriteAllText($vbs, $vbsContent, [System.Text.Encoding]::Default)
+Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$vbs`""
 
 # ---- 4. 等待就绪并自检 ----
 Say '[*] 等待服务就绪 ...'
